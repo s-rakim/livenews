@@ -5,7 +5,7 @@ import uuid
 import httpx
 
 from ..config import Settings
-from ..models import Account, Order, Position
+from ..models import Account, Execution, Order, Position, utcnow
 from ..store import Store
 from ..timeparse import parse_ts
 from .base import Broker, OrderRejected, OrderRequest
@@ -18,6 +18,10 @@ def _order(raw: dict) -> Order:
         limit_price=float(raw["limit_price"]) if raw.get("limit_price") else None,
         filled_avg_price=float(raw["filled_avg_price"]) if raw.get("filled_avg_price") else None,
         submitted_at=parse_ts(raw.get("submitted_at") or raw.get("created_at")) or parse_ts("1970-01-01T00:00:00Z"),
+        stop_price=float(raw["stop_price"]) if raw.get("stop_price") else None,
+        tif=raw.get("time_in_force") or "day",
+        filled_qty=float(raw.get("filled_qty") or 0),
+        trail_percent=float(raw["trail_percent"]) if raw.get("trail_percent") else None,
     )
 
 
@@ -39,12 +43,16 @@ class AlpacaBroker(Broker):
     async def submit(self, req: OrderRequest) -> Order:
         body = {
             "symbol": req.symbol, "qty": str(req.qty), "side": req.side, "type": req.type,
-            "time_in_force": "day",
+            "time_in_force": req.tif,
             # idempotency: if the request times out and we retry, Alpaca won't double fill
             "client_order_id": f"ln-{uuid.uuid4().hex[:20]}",
         }
-        if req.type == "limit":
+        if req.type in ("limit", "stop_limit"):
             body["limit_price"] = f"{req.limit_price:.2f}"
+        if req.type in ("stop", "stop_limit"):
+            body["stop_price"] = f"{req.stop_price:.2f}"
+        if req.type == "trailing_stop":
+            body["trail_percent"] = f"{req.trail_percent:g}"
         r = await self.client.post("/v2/orders", json=body)
         if r.status_code >= 400:
             try:

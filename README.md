@@ -21,21 +21,83 @@ Make the terminal window big. It's laid out for about 200x55.
 
 ## Using it
 
-Type in the command line at the bottom. Ticker first, then a function.
+Type in the command line at the bottom. Ticker first, then a function code.
+Esc (or `MAIN`) always brings you back to the main screen. `HELP` lists everything.
 
-| Type | Does |
+**Per ticker**
+
+| Type | Screen |
 |---|---|
-| `NVDA` | quote panel for NVDA, and starts streaming it |
-| `NVDA N` | news panel shows only NVDA |
-| `N` | back to all news |
-| `BUY NVDA 10` | market order ticket |
-| `SELL NVDA 10 LMT 142.50` | limit order ticket |
-| `CXL ALL` / `CXL <id>` | cancel open orders |
-| `PPL` / `PPL PELOSI` | people panel, all or one name |
-| `HELP` | all of the above |
+| `NVDA` | quote on the main screen, and starts streaming it |
+| `NVDA N` | news panel shows only NVDA (`N` for all) |
+| `NVDA CH [1D 5D 1M 3M 6M 1Y 5Y]` | candle chart with volume, RSI, MACD. SMA 20/50 and Bollinger bands on daily, VWAP on intraday |
+| `NVDA DES` | company profile, market cap, recent SEC filings with links |
+| `NVDA FA` / `NVDA FA Q` | income, cash flow and balance sheet lines, annual or quarterly, with margins and growth |
+| `NVDA EST` | analyst rating counts by month, EPS actual vs estimate, key ratios |
+| `NVDA INS` | insider buys and sells (Form 4) for the last year |
+| `NVDA OPT [n]` | options chain with IV and greeks, nearest expiry or expiry number n |
+| `BTC/USD CH` | crypto pairs work for charts too |
 
-F1 help, F2 news, F3 movers, F4 people, F5 positions, F9 back to the command
-line. Enter on any row (a mover, a headline, a filing) pulls up that ticker.
+**Market-wide**
+
+| Type | Screen |
+|---|---|
+| `MKTS` (or `FX`, `RATES`, `CMDTY`, `CRYPTO`) | indices, Treasury yields, Fed funds, FX, oil, gold, crypto |
+| `ECO [days]` | economic release calendar plus earnings dates for your watchlist |
+| `PORT` | positions, P&L, beta, volatility, value at risk, concentration |
+| `ORD` | every order and every fill, with submit-to-fill time |
+| `W` / `W ADD AMD` / `W DEL AMD` / `W USE tech` | watchlists, saved between runs |
+| `ALRT NVDA > 150` / `ALRT NVDA MOVE 5` / `ALRT NEWS FDA [NVDA]` / `ALRT DEL 2` | alerts: beep, pop-up, logged. Each fires once |
+| `PPL [name]` | congressional trades and commentator mentions |
+
+**Orders** (a ticket always opens for you to confirm)
+
+| Type | Order |
+|---|---|
+| `BUY NVDA 10` | market |
+| `BUY NVDA 10 LMT 140` | limit |
+| `SELL NVDA 10 STP 130` | stop |
+| `SELL NVDA 10 STP 130 LMT 129` | stop limit |
+| `SELL NVDA 10 TRAIL 3` | 3% trailing stop |
+| add `GTC` | good till cancelled (default is DAY) |
+| `CXL ALL` / `CXL <id>` | cancel |
+
+Keys: F1 help, F2 main, F3 markets, F4 calendar, F5 portfolio, F6 orders,
+F7 watchlist, F8 chart the selected ticker, F9 command line. Enter on any row
+(a mover, a headline, a filing) pulls up that ticker.
+
+![chart](docs/chart.png)
+![markets](docs/markets.png)
+![options](docs/options.png)
+
+## Keys per feature
+
+Everything runs in `--mock` with no keys. For real data:
+
+| Feature | Needs | Cost |
+|---|---|---|
+| News wire, live prices, movers, charts, crypto, options chains, paper orders, live fills | `ALPACA_API_KEY_ID` + `ALPACA_API_SECRET_KEY` | free |
+| Treasury yields, Fed funds, SOFR, oil, gas, economic calendar | `FRED_API_KEY` | free |
+| FX rates | nothing (ECB via Frankfurter) | free |
+| Financial statements, filings, company profile | `LIVENEWS_SEC_USER_AGENT` (your name + email, SEC rule) | free |
+| Analyst ratings, EPS surprises, insider trades, earnings dates, second news wire | `FINNHUB_API_KEY` | free tier |
+| Congressional trades | `FMP_API_KEY` | may need a paid plan |
+
+When a key is missing, that screen says which one to set rather than failing silently.
+
+## What isn't here, and why
+
+- **Chat / messaging.** That's Bloomberg's own network. Nothing to connect to.
+- **Real-time FX, futures, bonds.** No free real-time source exists. FX here is
+  the ECB's daily reference rate, rates and oil are FRED daily closes, and
+  live moves come from ETF proxies (TLT, GLD, USO, UUP and so on), labelled as such.
+- **Analyst price targets, estimate revisions, institutional holders (13F).**
+  Paid on every provider I checked. Finnhub's free tier gives rating counts
+  and EPS surprises, which is what EST shows.
+- **Options quotes are "indicative".** Alpaca's free options feed is
+  approximate and can lag. Fine for scanning, check the real quote before
+  trading. Options orders aren't wired up; the order ticket is stocks only.
+- **Event times on the calendar.** FRED publishes release dates, not times.
 
 ## Where the data comes from, and how fresh it is
 
@@ -73,9 +135,12 @@ Red means it's failing and the error is in the LOG panel.
     4x volume with two headlines ranks above a 6% move nobody is trading.
 
 **Rate limits.** Alpaca's free data plan is 200 requests/min. With the
-defaults this uses about 115 to 145/min (news 60, screener 24, snapshots 30
-or 60 depending on how many tickers are on screen) and a
-shared limiter holds it under 180 no matter what you set the intervals to.
+defaults the main screen uses about 115 to 145/min (news 60, screener 24,
+snapshots 30 or 60 depending on how many tickers are on screen). Function
+screens add a few calls when they open and refresh (MKTS every 5s, options
+every 15s, charts every 15s intraday). One shared limiter holds everything
+under 180, so heavy use slows screens down rather than getting you blocked.
+FRED, SEC and Finnhub responses are cached (1h, 6h and 10min).
 
 **People**
 - Congress trades come from STOCK Act filings via Financial Modeling Prep
@@ -95,13 +160,17 @@ shared limiter holds it under 180 no matter what you set the intervals to.
 - Live needs `LIVENEWS_TRADING_MODE=live` **and**
   `LIVENEWS_ALLOW_LIVE=yes-i-understand`, plus live keys. Live with mock data
   is refused outright.
-- Every order opens a ticket you have to confirm. In live mode the Send button
+- Every order opens a ticket you have to confirm, including stops and trailing stops. In live mode the Send button
   stays disabled until you type the ticker.
 - Before anything is sent: orders over `LIVENEWS_MAX_ORDER_VALUE` are
   refused, limit prices more than 10% from last are refused as likely typos,
   and you can't place an order on a ticker with no price yet.
 - Each Alpaca order carries a unique `client_order_id` so a retried request
   can't fill twice.
+- Fills come in over Alpaca's `trade_updates` stream as they happen, and
+  `ORD` shows each one with how long it took from submit to fill.
+- A buy stop below the market (or sell stop above it) is refused because it
+  would trigger the moment it lands.
 - In mock mode a local simulator fills market orders at the simulated price.
 
 ## Tests
@@ -111,10 +180,12 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests cover the config safety switches, order checks, the command parser,
-parsing of every API response shape, the ranking math, dedupe, the rate
-limiter, and the UI flow (ticket opens, cancel sends nothing, live ticket
-stays locked until the ticker is typed).
+The tests cover the config safety switches, order checks and stop logic,
+the command parser, every API response parser (including the function-screen
+providers against canned responses), indicator math against reference values,
+Black-Scholes, SEC statement extraction, portfolio risk, alerts, watchlist
+persistence, and the UI (every function screen opens without errors, the
+ticket flow, live ticket stays locked until the ticker is typed).
 
 ## Layout
 
@@ -134,5 +205,15 @@ livenews/
     base.py          order checks
     alpaca.py        Alpaca trading API
     sim.py           local fill simulator
+  indicators.py      SMA EMA RSI MACD Bollinger VWAP ATR
+  risk.py            beta, vol, VaR, drawdown, concentration
+  options_math.py    OCC symbols, Black-Scholes
+  userdata.py        watchlists and alerts (~/.livenews)
+  hub/
+    live.py          Alpaca, FRED, Frankfurter, SEC, Finnhub for function screens
+    sec.py           XBRL statement extraction
+    mock.py          made-up data for every screen
+  sources/trade_updates.py  live order events
   ui/app.py          the terminal
+  ui/views.py        function screens (CH MKTS ECO DES FA EST INS OPT PORT ORD W)
 ```

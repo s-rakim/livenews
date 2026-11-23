@@ -2,17 +2,17 @@ import asyncio
 
 from textual.widgets import Button
 
-from livenews.__main__ import build
+from livenews.__main__ import make_app
 from livenews.config import load_settings
 from livenews.store import Store
-from livenews.ui.app import OrderTicket, Terminal
+from livenews.ui.app import OrderTicket
 
 
 def _app():
     s = load_settings(env_file=None, force_mock=True)
     store = Store()
-    sources, broker, people, follow, closers = build(s, store)
-    return Terminal(s, store, sources, broker, people, follow=follow, closers=closers), store, broker
+    app, parts = make_app(s, store)
+    return app, store, parts["broker"]
 
 
 async def _type(pilot, text):
@@ -70,5 +70,28 @@ def test_live_ticket_needs_symbol_typed():
             app.screen.query_one("#confirm_sym").value = "nvda"
             await pilot.pause(0.2)
             assert not send.disabled
+
+    asyncio.run(go())
+
+
+def test_every_function_screen_loads():
+    app, store, broker = _app()
+
+    async def go():
+        async with app.run_test(size=(200, 55)) as pilot:
+            await pilot.pause(2)
+            await broker.submit(__import__("livenews.broker", fromlist=["OrderRequest"]).OrderRequest("NVDA", "buy", 3))
+            for cmd in ["NVDA CH", "NVDA CH 1D", "MKTS", "ECO", "NVDA DES", "NVDA FA", "NVDA FA Q", "NVDA EST",
+                        "NVDA INS", "NVDA OPT", "NVDA OPT 2", "PORT", "ORD", "W", "W ADD COIN", "ALRT NVDA > 1"]:
+                await app.run_command(cmd)
+                await pilot.pause(0.8)
+                if app.fn_view is not None:
+                    errs = app.fn_view.query("#fn_err")
+                    if errs:
+                        assert str(errs.first().render()).strip() == "", f"{cmd}: {errs.first().render()}"
+            assert "COIN" in app.watch.symbols
+            await pilot.press("escape")
+            await pilot.pause(0.3)
+            assert app.fn_view is None
 
     asyncio.run(go())

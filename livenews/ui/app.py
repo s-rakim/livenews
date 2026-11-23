@@ -7,18 +7,21 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Grid, Horizontal, Vertical
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Input, Static
+from textual.widgets import Button, ContentSwitcher, DataTable, Input, Static
 
 from .. import engine
 from ..broker import Broker, OrderRejected, OrderRequest, check_order
 from ..commands import __doc__ as COMMAND_HELP
-from ..commands import parse
+from ..commands import order_type, parse
+from ..hub import Hub
 from ..config import Settings
 from ..models import utcnow
 from ..sources.people import PeopleTracker
 from ..store import FeedStatus, Store
+from ..userdata import AlertBook, Watchlists
+from . import views as V
 
 AMBER = "#ffb000"
 UP = "#2ee86c"
@@ -30,7 +33,25 @@ CSS = f"""
 Screen {{ background: #000000; color: {AMBER}; }}
 #top {{ height: 1; background: #1a1200; }}
 #feeds {{ height: 1; background: #0d0d0d; }}
+#body {{ height: 1fr; }}
+#dash {{ height: 1fr; }}
 #grid {{ grid-size: 4 2; grid-rows: 2fr 3fr; grid-gutter: 0; height: 1fr; }}
+#fn {{ height: 1fr; }}
+#fnbar {{ height: 1; background: #1a1200; }}
+.fnview {{ height: 1fr; }}
+.fnview > .panel {{ height: 1fr; }}
+.fnview Horizontal {{ height: 1fr; }}
+.fnview Horizontal > .panel {{ width: 1fr; }}
+#fn_err {{ height: auto; }}
+#ch_head, #opt_head {{ height: 2; }}
+#ch_p {{ height: 3fr; }}
+#ch_lower {{ height: 2fr; }}
+#mk_grid {{ grid-size: 3 2; height: 1fr; }}
+#mkp_INDICES, #mkp_CRYPTO {{ }}
+#port_sp {{ height: 7; }}
+#est_mp {{ height: 5; }}
+#des_p {{ width: 2fr; }}
+#des_fp {{ width: 3fr; }}
 #bottom {{ height: 9; }}
 .panel {{ border: round #5c4300; border-title-color: {AMBER}; border-title-style: bold;
          border-subtitle-color: {DIM}; background: #000000; padding: 0; }}
@@ -57,7 +78,7 @@ OrderTicket {{ align: center middle; }}
 #ticket Static {{ height: auto; }}
 OrderTicket, HelpScreen {{ background: rgba(0,0,0,0.6); }}
 HelpScreen {{ align: center middle; }}
-#helpbox {{ width: 70; height: auto; border: thick {AMBER}; background: #0d0900; padding: 1 2; }}
+#helpbox {{ width: 100; height: 90%; border: thick {AMBER}; background: #0d0900; padding: 1 2; }}
 """
 
 
@@ -155,10 +176,11 @@ class HelpScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         keys = (
-            "\nKeys: F1 help  F2 news  F3 movers  F4 people  F5 positions  "
-            "F9 command line  Enter on a row selects it  Esc closes dialogs  Ctrl+Q quits"
+            "\nKeys: F1 help  F2 main  F3 markets  F4 calendar  F5 portfolio  F6 orders  F7 watchlist\n"
+            "F8 chart selected  F9 command line  Enter on a row selects it  Esc goes back  Ctrl+Q quits"
         )
-        yield Static(Text(COMMAND_HELP.strip() + "\n" + keys, style=AMBER), id="helpbox")
+        with VerticalScroll(id="helpbox"):
+            yield Static(Text(COMMAND_HELP.strip() + "\n" + keys, style=AMBER))
 
 
 class Terminal(App):
@@ -166,17 +188,26 @@ class Terminal(App):
     TITLE = "livenews"
     BINDINGS = [
         Binding("f1", "help", "Help"),
-        Binding("f2", "focus('news_t')", "News"),
-        Binding("f3", "focus('gain_t')", "Movers"),
-        Binding("f4", "focus('people_t')", "People"),
-        Binding("f5", "focus('book_t')", "Positions"),
+        Binding("f2", "run('MAIN')", "Main"),
+        Binding("f3", "run('MKTS')", "Markets"),
+        Binding("f4", "run('ECO')", "Calendar"),
+        Binding("f5", "run('PORT')", "Portfolio"),
+        Binding("f6", "run('ORD')", "Orders"),
+        Binding("f7", "run('W')", "Watchlist"),
+        Binding("f8", "chart_selected", "Chart"),
         Binding("f9", "focus('cmd')", "Command"),
+        Binding("escape", "run('MAIN')", "Main", show=False),
         Binding("ctrl+q", "quit", "Quit"),
     ]
 
     def __init__(self, settings: Settings, store: Store, sources: list, broker: Broker,
-                 people: PeopleTracker, follow=None, closers=()):
+                 people: PeopleTracker, follow=None, closers=(), hub: Hub | None = None,
+                 watch: Watchlists | None = None, alerts: AlertBook | None = None):
         super().__init__()
+        self.hub = hub
+        self.watch = watch or Watchlists(settings.watchlist)
+        self.alerts = alerts or AlertBook.load()
+        self.fn_view: V.FnView | None = None
         self.s = settings
         self.store = store
         self.sources = sources
@@ -194,31 +225,37 @@ class Terminal(App):
     def compose(self) -> ComposeResult:
         yield Static(id="top")
         yield Static(id="feeds")
-        with Grid(id="grid"):
-            for wid, title in (("gain", "GAINERS"), ("lose", "LOSERS"), ("vol", "VOLUME"), ("hot", "HOT  move x volume x news")):
-                with Vertical(classes="panel", id=wid) as v:
-                    v.border_title = title
-                    yield DataTable(id=f"{wid}_t", cursor_type="row", zebra_stripes=False)
-            with Vertical(classes="panel", id="news") as v:
-                v.border_title = "NEWS"
-                yield DataTable(id="news_t", cursor_type="row")
-            with Vertical(id="side"):
-                with Vertical(classes="panel", id="quote") as v:
-                    v.border_title = "QUOTE"
-                    yield Static(id="quote_s")
-                with Vertical(classes="panel", id="people") as v:
-                    v.border_title = "PEOPLE"
-                    yield DataTable(id="people_t", cursor_type="row")
-        with Horizontal(id="bottom"):
-            with Vertical(classes="panel", id="book") as v:
-                v.border_title = "POSITIONS / ORDERS"
-                yield DataTable(id="book_t", cursor_type="row")
-            with Vertical(classes="panel", id="log") as v:
-                v.border_title = "LOG"
-                yield Static(id="log_s")
+        with ContentSwitcher(initial="dash", id="body"):
+            with Vertical(id="dash"):
+                with Grid(id="grid"):
+                    for wid, title in (("gain", "GAINERS"), ("lose", "LOSERS"), ("vol", "VOLUME"),
+                                       ("hot", "HOT  move x volume x news")):
+                        with Vertical(classes="panel", id=wid) as v:
+                            v.border_title = title
+                            yield DataTable(id=f"{wid}_t", cursor_type="row", zebra_stripes=False)
+                    with Vertical(classes="panel", id="news") as v:
+                        v.border_title = "NEWS"
+                        yield DataTable(id="news_t", cursor_type="row")
+                    with Vertical(id="side"):
+                        with Vertical(classes="panel", id="quote") as v:
+                            v.border_title = "QUOTE"
+                            yield Static(id="quote_s")
+                        with Vertical(classes="panel", id="people") as v:
+                            v.border_title = "PEOPLE"
+                            yield DataTable(id="people_t", cursor_type="row")
+                with Horizontal(id="bottom"):
+                    with Vertical(classes="panel", id="book") as v:
+                        v.border_title = "POSITIONS / ORDERS"
+                        yield DataTable(id="book_t", cursor_type="row")
+                    with Vertical(classes="panel", id="log") as v:
+                        v.border_title = "LOG"
+                        yield Static(id="log_s")
+            with Vertical(id="fn"):
+                yield Static(id="fnbar")
         with Horizontal(id="cmdrow"):
             yield Static(">", id="prompt")
-            yield Input(placeholder="ticker + function, e.g.  NVDA <Enter>   NVDA N   BUY NVDA 10   HELP", id="cmd")
+            yield Input(placeholder="ticker + function:  NVDA   NVDA CH   NVDA FA   MKTS   ECO   PORT   BUY NVDA 10   HELP",
+                        id="cmd")
         yield Static(id="msg")
 
     def on_mount(self) -> None:
@@ -272,6 +309,13 @@ class Terminal(App):
             feeds.append_text(feed_badge(f))
         self.query_one("#feeds", Static).update(feeds)
 
+        for a in self.alerts.check(self.store):
+            self.bell()
+            self.notify(a.note, title=f"ALERT {a.id}: {a.describe()}", severity="warning", timeout=15)
+            self.store.note(f"ALERT {a.id} {a.note}")
+
+        if self.query_one("#body", ContentSwitcher).current != "dash":
+            return
         movers = engine.build_movers(self.store)
         self._fill_movers("gain_t", engine.top_gainers(movers))
         self._fill_movers("lose_t", engine.top_losers(movers))
@@ -354,6 +398,8 @@ class Terminal(App):
 
     def refresh_news(self) -> None:
         self.people.scan_news()
+        if self.query_one("#body", ContentSwitcher).current != "dash":
+            return
         nt = self.query_one("#news_t", DataTable)
         panel = self.query_one("#news")
         panel.border_title = f"NEWS  {self.news_filter}" if self.news_filter else "NEWS  all"
@@ -467,31 +513,131 @@ class Terminal(App):
     async def _cmd(self, e: Input.Submitted) -> None:
         line = e.value
         e.input.value = ""
+        await self.run_command(line)
+
+    async def action_run(self, line: str) -> None:
+        await self.run_command(line)
+
+    async def action_chart_selected(self) -> None:
+        await self.run_command(f"{self.selected} CH")
+
+    def show_dash(self) -> None:
+        self.query_one("#body", ContentSwitcher).current = "dash"
+        if self.fn_view is not None:
+            self.fn_view.remove()
+            self.fn_view = None
+        self.query_one("#cmd", Input).focus()
+
+    def show_fn(self, view: V.FnView) -> None:
+        if self.hub is None and not isinstance(view, (V.BlotterView, V.WatchView)):
+            self.say("no data hub configured", err=True)
+            return
+        if self.fn_view is not None:
+            self.fn_view.remove()
+        self.fn_view = view
+        host = self.query_one("#fn", Vertical)
+        host.mount(view)
+        bar = Text()
+        bar.append(f" {view.title} ", style=f"bold #000000 on {AMBER}")
+        bar.append("   Esc or MAIN for the main screen   F1 help", style=DIM)
+        self.query_one("#fnbar", Static).update(bar)
+        self.query_one("#body", ContentSwitcher).current = "fn"
+        self.query_one("#cmd", Input).focus()
+
+    async def run_command(self, line: str) -> None:
         c = parse(line)
-        if c.kind == "error":
+        k = c.kind
+        hub, st = self.hub, self.store
+        if k == "error":
             self.say(c.error, err=True)
-        elif c.kind == "help":
+        elif k == "help":
             self.action_help()
-        elif c.kind == "quote":
+        elif k == "main":
+            self.show_dash()
+        elif k == "quote":
             self.select(c.symbol)
-            self.say(f"{c.symbol} quote")
-        elif c.kind == "news":
+            self.show_dash()
+            self.say(f"{c.symbol} quote. {c.symbol} CH for a chart, {c.symbol} DES for the company")
+        elif k == "news":
             self.select(c.symbol)
             self.news_filter = c.symbol
+            self.show_dash()
             self.refresh_news()
             self.say(f"news filtered to {c.symbol}. N for all")
-        elif c.kind == "allnews":
+        elif k == "allnews":
             self.news_filter = None
+            self.show_dash()
             self.refresh_news()
             self.say("all news")
-        elif c.kind == "people":
+        elif k == "chart":
+            self.select(c.symbol)
+            self.show_fn(V.ChartView(hub, st, c.symbol, c.arg))
+        elif k == "des":
+            self.select(c.symbol)
+            self.show_fn(V.DesView(hub, st, c.symbol))
+        elif k == "fa":
+            self.select(c.symbol)
+            self.show_fn(V.FaView(hub, st, c.symbol, c.arg))
+        elif k == "est":
+            self.select(c.symbol)
+            self.show_fn(V.EstView(hub, st, c.symbol))
+        elif k == "ins":
+            self.select(c.symbol)
+            self.show_fn(V.InsView(hub, st, c.symbol))
+        elif k == "opt":
+            self.select(c.symbol)
+            self.show_fn(V.OptView(hub, st, c.symbol, c.arg))
+        elif k == "mkts":
+            self.show_fn(V.MarketsView(hub, st, c.arg))
+        elif k == "eco":
+            self.show_fn(V.EcoView(hub, st, int(c.value), list(self.watch.symbols)))
+        elif k == "port":
+            self.show_fn(V.PortView(hub, st))
+        elif k == "blotter":
+            self.show_fn(V.BlotterView(hub, st))
+        elif k == "watch":
+            self.show_fn(V.WatchView(hub, st, self.watch, self.alerts))
+        elif k in ("watch_add", "watch_del"):
+            if k == "watch_add":
+                self.watch.add(*c.args)
+                for sym in c.args:
+                    if self.follow:
+                        asyncio.create_task(self.follow(sym))
+            else:
+                self.watch.remove(*c.args)
+            self.s.watchlist[:] = self.watch.symbols
+            self.say(f"watchlist {self.watch.active}: {' '.join(self.watch.symbols)}")
+            self.show_fn(V.WatchView(hub, st, self.watch, self.alerts))
+        elif k == "watch_use":
+            self.watch.use(c.arg)
+            self.s.watchlist[:] = self.watch.symbols
+            for sym in self.watch.symbols:
+                if self.follow:
+                    asyncio.create_task(self.follow(sym))
+            self.say(f"using watchlist {self.watch.active}")
+            self.show_fn(V.WatchView(hub, st, self.watch, self.alerts))
+        elif k == "alerts":
+            self.show_fn(V.WatchView(hub, st, self.watch, self.alerts))
+        elif k == "alert_add":
+            if c.arg == "news":
+                a = self.alerts.add("news", c.symbol, keyword=c.args[0])
+            else:
+                a = self.alerts.add(c.arg, c.symbol, c.value)
+                if self.follow:
+                    asyncio.create_task(self.follow(c.symbol))
+            self.say(f"alert {a.id} armed: {a.describe()}")
+        elif k == "alert_del":
+            ok = self.alerts.remove(int(c.value))
+            self.say(f"alert {int(c.value)} removed" if ok else f"no alert {int(c.value)}", err=not ok)
+        elif k == "people":
             self.people_filter = c.arg
+            self.show_dash()
             await self.refresh_slow()
             self.say(f"people: {c.arg or 'all tracked'}")
-        elif c.kind == "cancel":
+        elif k == "cancel":
             self.do_cancel(c.arg)
-        elif c.kind == "order":
-            self.do_order(OrderRequest(c.symbol, c.side, c.qty, "limit" if c.limit else "market", c.limit))
+        elif k == "order":
+            self.do_order(OrderRequest(c.symbol, c.side, c.qty, order_type(c), c.limit, c.stop, c.tif, c.trail))
 
     @work(exclusive=False)
     async def do_cancel(self, arg: str) -> None:

@@ -57,6 +57,10 @@ class Order:
     limit_price: float | None = None
     filled_avg_price: float | None = None
     submitted_at: datetime = field(default_factory=utcnow)
+    stop_price: float | None = None
+    tif: str = "day"
+    filled_qty: float = 0.0
+    trail_percent: float | None = None
 
 
 @dataclass
@@ -77,3 +81,19 @@ class Account:
     cash: float
     buying_power: float
     day_pl: float = 0.0
+
+
+@dataclass
+class Execution:
+    """One order lifecycle event: new, fill, partial_fill, canceled, rejected..."""
+
+    ts: datetime
+    event: str
+    order_id: str
+    symbol: str
+    side: str
+    qty: float  # qty of this fill, or order qty for non-fill events
+    price: float | None = None
+    position_qty: float | None = None
+    latency_ms: float | None = None  # submit -> this event, as reported by the broker
+    source: str = ""

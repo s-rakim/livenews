@@ -7,7 +7,7 @@ from datetime import timedelta
 from dataclasses import dataclass
 from datetime import datetime
 
-from .models import Account, NewsItem, Order, Position, Quote, utcnow
+from .models import Account, Execution, NewsItem, Order, Position, Quote, utcnow
 
 
 @dataclass
@@ -44,6 +44,7 @@ class Store:
         self.orders: list[Order] = []
         self.feeds: dict[str, FeedStatus] = {}
         self.log: deque[str] = deque(maxlen=200)
+        self.executions: deque[Execution] = deque(maxlen=500)
         self.news_version = 0
 
     # news -----------------------------------------------------------------
