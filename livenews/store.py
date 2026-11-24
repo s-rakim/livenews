@@ -45,6 +45,7 @@ class Store:
         self.feeds: dict[str, FeedStatus] = {}
         self.log: deque[str] = deque(maxlen=200)
         self.executions: deque[Execution] = deque(maxlen=500)
+        self.fx: dict[str, tuple[float, datetime]] = {}  # streaming FX / metals, label -> (price, time)
         self.news_version = 0
 
     # news -----------------------------------------------------------------

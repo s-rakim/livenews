@@ -24,6 +24,7 @@ UNIVERSE = {
     "ADBE": 510, "SNOW": 170, "SMCI": 30, "ARM": 140, "TSM": 195, "BABA": 88, "GME": 28,
     "AMC": 4.6, "HOOD": 38, "MARA": 23, "RIOT": 12,
 }
+CRYPTO = {"BTC/USD": 96000, "ETH/USD": 3400, "SOL/USD": 180}
 
 UP = [
     "{s} beats on revenue and raises full-year guidance",
@@ -83,7 +84,7 @@ class MockMarket:
         from ..engine import session_fraction
 
         frac = session_fraction()
-        for s, px in UNIVERSE.items():
+        for s, px in {**UNIVERSE, **CRYPTO}.items():
             prev = px * (1 + self.rng.uniform(-0.01, 0.01))
             pv = self.rng.uniform(5e6, 60e6)
             # most names trade near normal pace, a few are already running hot
@@ -102,12 +103,12 @@ class MockMarket:
     def _headline(self) -> NewsItem:
         r = self.rng.random()
         if r < 0.08:
-            sym = self.rng.choice(list(self.syms))
+            sym = self.rng.choice(list(UNIVERSE))
             text, syms = self.rng.choice(CRAMER).format(s=sym), [sym]
         elif r < 0.30:
             text, syms = self.rng.choice(MACRO), []
         else:
-            sym = self.rng.choice(list(self.syms))
+            sym = self.rng.choice(list(UNIVERSE))
             up = self.rng.random() < 0.55
             text = self.rng.choice(UP if up else DOWN).format(s=sym, n=self.rng.randint(1, 9))
             syms = [sym]

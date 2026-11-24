@@ -63,8 +63,8 @@ def build_movers(store: Store, now: datetime | None = None) -> list[Mover]:
     counts = store.news_counts(60)
     out = []
     for sym, q in store.quotes.items():
-        if not q.prev_close:
-            continue
+        if not q.prev_close or "/" in sym:
+            continue  # crypto trades 24/7, session-based RVOL means nothing for it
         m = Mover(
             symbol=sym,
             price=q.price,

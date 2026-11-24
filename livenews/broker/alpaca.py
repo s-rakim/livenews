@@ -5,7 +5,7 @@ import uuid
 import httpx
 
 from ..config import Settings
-from ..models import Account, Execution, Order, Position, utcnow
+from ..models import Account, Order, Position
 from ..store import Store
 from ..timeparse import parse_ts
 from .base import Broker, OrderRejected, OrderRequest
@@ -25,6 +25,25 @@ def _order(raw: dict) -> Order:
     )
 
 
+def _qty(q: float) -> str:
+    return format(q, "f").rstrip("0").rstrip(".") if q != int(q) else str(int(q))
+
+
+def _px(p: float) -> str:
+    return f"{p:.2f}" if p >= 1 else f"{p:.6f}".rstrip("0")
+
+
+def position_symbol(raw: dict) -> str:
+    """Alpaca reports crypto positions as BTCUSD while quotes and orders use
+    BTC/USD. Put the slash back so the position lines up with its quote."""
+    sym = raw["symbol"]
+    if raw.get("asset_class") == "crypto" and "/" not in sym:
+        for quote in ("USDT", "USDC", "USD", "BTC"):
+            if sym.endswith(quote) and len(sym) > len(quote):
+                return f"{sym[:-len(quote)]}/{quote}"
+    return sym
+
+
 class AlpacaBroker(Broker):
     """Alpaca trading API. Paper by default: the URL comes from Settings and
     only points at the live endpoint when both live switches are set."""
@@ -42,15 +61,15 @@ class AlpacaBroker(Broker):
 
     async def submit(self, req: OrderRequest) -> Order:
         body = {
-            "symbol": req.symbol, "qty": str(req.qty), "side": req.side, "type": req.type,
+            "symbol": req.symbol, "qty": _qty(req.qty), "side": req.side, "type": req.type,
             "time_in_force": req.tif,
             # idempotency: if the request times out and we retry, Alpaca won't double fill
             "client_order_id": f"ln-{uuid.uuid4().hex[:20]}",
         }
         if req.type in ("limit", "stop_limit"):
-            body["limit_price"] = f"{req.limit_price:.2f}"
+            body["limit_price"] = _px(req.limit_price)
         if req.type in ("stop", "stop_limit"):
-            body["stop_price"] = f"{req.stop_price:.2f}"
+            body["stop_price"] = _px(req.stop_price)
         if req.type == "trailing_stop":
             body["trail_percent"] = f"{req.trail_percent:g}"
         r = await self.client.post("/v2/orders", json=body)
@@ -80,7 +99,8 @@ class AlpacaBroker(Broker):
         )
         pos = (await self.client.get("/v2/positions")).raise_for_status().json()
         self.store.positions = [
-            Position(p["symbol"], float(p["qty"]), float(p["avg_entry_price"]), float(p["current_price"]))
+            Position(position_symbol(p), float(p["qty"]), float(p["avg_entry_price"]), float(p["current_price"]),
+                     100.0 if p.get("asset_class") == "us_option" else 1.0)
             for p in pos
         ]
         orders = (await self.client.get("/v2/orders", params={"status": "all", "limit": 30})).raise_for_status().json()

@@ -12,12 +12,13 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, ContentSwitcher, DataTable, Input, Static
 
 from .. import engine
-from ..broker import Broker, OrderRejected, OrderRequest, check_order
+from ..broker import Broker, OrderRejected, OrderRequest, asset_class, check_order
 from ..commands import __doc__ as COMMAND_HELP
 from ..commands import order_type, parse
 from ..hub import Hub
 from ..config import Settings
 from ..models import utcnow
+from ..options_math import parse_occ
 from ..sources.people import PeopleTracker
 from ..store import FeedStatus, Store
 from ..userdata import AlertBook, Watchlists
@@ -43,14 +44,23 @@ Screen {{ background: #000000; color: {AMBER}; }}
 .fnview Horizontal {{ height: 1fr; }}
 .fnview Horizontal > .panel {{ width: 1fr; }}
 #fn_err {{ height: auto; }}
-#ch_head, #opt_head {{ height: 2; }}
+#ch_head, #opt_head, #own_head {{ height: 2; }}
 #ch_p {{ height: 3fr; }}
 #ch_lower {{ height: 2fr; }}
 #mk_grid {{ grid-size: 3 2; height: 1fr; }}
+#mk_grid > .panel {{ height: 1fr; }}
 #mkp_INDICES, #mkp_CRYPTO {{ }}
 #port_sp {{ height: 7; }}
-#est_mp {{ height: 5; }}
+#est_bottom {{ height: 11; }}
+#est_ptp {{ width: 2fr; }}
+#est_mp {{ width: 3fr; }}
 #des_p {{ width: 2fr; }}
+#chat_side {{ width: 30; }}
+#chat_rp {{ height: 1fr; }}
+#chat_up {{ height: 1fr; }}
+#chat_main {{ width: 1fr; }}
+#chat_mp {{ height: 1fr; }}
+#chat_in {{ background: #0d0900; border: tall #5c4300; }}
 #des_fp {{ width: 3fr; }}
 #bottom {{ height: 9; }}
 .panel {{ border: round #5c4300; border-title-color: {AMBER}; border-title-style: bold;
@@ -146,10 +156,16 @@ class OrderTicket(ModalScreen[bool]):
             head.append_text(mode)
             yield Static(head)
             body = Text()
+            cls = asset_class(self.req.symbol)
             body.append(f"\n{self.req.describe()}\n", style="bold white")
-            body.append(f"last {self.ref:.2f}   " if self.ref else "last --   ", style=AMBER)
+            ref_label = "mid" if cls == "option" else "last"
+            body.append(f"{ref_label} {self.ref:,.2f}   " if self.ref else f"{ref_label} --   ", style=AMBER)
             body.append(f"est. value ${self.est:,.2f}\n", style=AMBER)
-            body.append(f"via {self.broker.name}, time in force DAY\n", style=DIM)
+            if cls == "option":
+                body.append(f"{self.req.qty:g} contract(s) x 100 shares each\n", style=DIM)
+            elif cls == "crypto":
+                body.append("crypto trades 24/7, order stays open until filled or cancelled\n", style=DIM)
+            body.append(f"via {self.broker.name}, time in force {self.req.tif.upper()}\n", style=DIM)
             yield Static(body)
             if live:
                 yield Static(Text(f"Type {self.req.symbol} to confirm a real order:", style=DOWN))
@@ -195,6 +211,7 @@ class Terminal(App):
         Binding("f6", "run('ORD')", "Orders"),
         Binding("f7", "run('W')", "Watchlist"),
         Binding("f8", "chart_selected", "Chart"),
+        Binding("f10", "run('MSG')", "Chat"),
         Binding("f9", "focus('cmd')", "Command"),
         Binding("escape", "run('MAIN')", "Main", show=False),
         Binding("ctrl+q", "quit", "Quit"),
@@ -202,8 +219,11 @@ class Terminal(App):
 
     def __init__(self, settings: Settings, store: Store, sources: list, broker: Broker,
                  people: PeopleTracker, follow=None, closers=(), hub: Hub | None = None,
-                 watch: Watchlists | None = None, alerts: AlertBook | None = None):
+                 watch: Watchlists | None = None, alerts: AlertBook | None = None, chat=None):
         super().__init__()
+        self.chat = chat
+        if chat is not None:
+            chat.on_message = self._on_chat
         self.hub = hub
         self.watch = watch or Watchlists(settings.watchlist)
         self.alerts = alerts or AlertBook.load()
@@ -298,6 +318,10 @@ class Terminal(App):
         top.append("OPEN" if open_ else "CLOSED", style=UP if open_ else DOWN)
         top.append("   ORDERS: ", style=DIM)
         top.append(self.broker.name.upper(), style=f"bold {DOWN}" if self.broker.is_live else f"bold {UP}")
+        if self.chat is not None:
+            n = sum(self.chat.state.unread.values())
+            top.append("   MSG ", style=DIM)
+            top.append(f"{n} new" if n else self.chat.state.status.split(" ")[0], style=f"bold {DOWN}" if n else DIM)
         a = self.store.account
         if a:
             top.append(f"   EQ ${a.equity:,.0f}  BP ${a.buying_power:,.0f}  DAY ", style=AMBER)
@@ -459,7 +483,8 @@ class Terminal(App):
         prow = []
         for e in evs[:80]:
             if e.kind == "TRADE":
-                act = Text(e.action[:10], style=UP if e.action.lower().startswith("p") else DOWN)
+                a = e.action.lower()
+                act = Text(e.action[:12], style=UP if a.startswith("purchase") else DOWN if a.startswith("sale") else AMBER)
                 lag = f"{e.lag_days}d" if e.lag_days is not None else "?"
                 prow.append((e.key, (f"{e.filed:%m-%d}", e.person[:22], Text(e.symbol, style=f"bold {CYAN}"), act, e.amount, lag)))
             else:
@@ -521,6 +546,14 @@ class Terminal(App):
     async def action_chart_selected(self) -> None:
         await self.run_command(f"{self.selected} CH")
 
+    def _on_chat(self, m: dict) -> None:
+        me = self.chat.state.user.lower()
+        direct = m["room"].startswith("@")
+        mention = f"@{me}" in m.get("text", "").lower()
+        if (direct or mention) and not (self.chat.viewing and self.chat.state.room == m["room"]):
+            self.bell()
+            self.notify(m["text"][:200], title=f"MSG from {m['from']}", timeout=10)
+
     def show_dash(self) -> None:
         self.query_one("#body", ContentSwitcher).current = "dash"
         if self.fn_view is not None:
@@ -529,7 +562,7 @@ class Terminal(App):
         self.query_one("#cmd", Input).focus()
 
     def show_fn(self, view: V.FnView) -> None:
-        if self.hub is None and not isinstance(view, (V.BlotterView, V.WatchView)):
+        if self.hub is None and not isinstance(view, (V.BlotterView, V.WatchView, V.ChatView)):
             self.say("no data hub configured", err=True)
             return
         if self.fn_view is not None:
@@ -537,12 +570,15 @@ class Terminal(App):
         self.fn_view = view
         host = self.query_one("#fn", Vertical)
         host.mount(view)
-        bar = Text()
-        bar.append(f" {view.title} ", style=f"bold #000000 on {AMBER}")
-        bar.append("   Esc or MAIN for the main screen   F1 help", style=DIM)
-        self.query_one("#fnbar", Static).update(bar)
+        self.set_fnbar(view.title)
         self.query_one("#body", ContentSwitcher).current = "fn"
         self.query_one("#cmd", Input).focus()
+
+    def set_fnbar(self, title: str) -> None:
+        bar = Text()
+        bar.append(f" {title} ", style=f"bold #000000 on {AMBER}")
+        bar.append("   Esc or MAIN for the main screen   F1 help", style=DIM)
+        self.query_one("#fnbar", Static).update(bar)
 
     async def run_command(self, line: str) -> None:
         c = parse(line)
@@ -554,6 +590,12 @@ class Terminal(App):
             self.action_help()
         elif k == "main":
             self.show_dash()
+        elif k == "quote" and parse_occ(c.symbol):
+            oc = parse_occ(c.symbol)
+            self.show_fn(V.OptView(hub, st, oc.root, oc.expiry.isoformat()))
+            self.say(f"{c.symbol}: {oc.root} {oc.expiry} {oc.strike:g} {'call' if oc.right == 'C' else 'put'}")
+        elif k == "quote" and asset_class(c.symbol) == "data":
+            self.show_fn(V.ChartView(hub, st, c.symbol, "1D"))
         elif k == "quote":
             self.select(c.symbol)
             self.show_dash()
@@ -584,6 +626,9 @@ class Terminal(App):
         elif k == "ins":
             self.select(c.symbol)
             self.show_fn(V.InsView(hub, st, c.symbol))
+        elif k == "own":
+            self.select(c.symbol)
+            self.show_fn(V.OwnView(hub, st, c.symbol))
         elif k == "opt":
             self.select(c.symbol)
             self.show_fn(V.OptView(hub, st, c.symbol, c.arg))
@@ -629,6 +674,19 @@ class Terminal(App):
         elif k == "alert_del":
             ok = self.alerts.remove(int(c.value))
             self.say(f"alert {int(c.value)} removed" if ok else f"no alert {int(c.value)}", err=not ok)
+        elif k == "msg":
+            if self.chat is None:
+                self.say("chat is turned off (LIVENEWS_CHAT=off)", err=True)
+                return
+            target = c.arg
+            if c.args:  # MSG @bob hello / MSG #room hello / MSG hello
+                try:
+                    await self.chat.send(" ".join(c.args), target or None)
+                    self.say(f"sent to {target or self.chat.state.room}")
+                except Exception as ex:
+                    self.say(f"chat: {ex}", err=True)
+                return
+            self.show_fn(V.ChatView(hub, st, self.chat, target))
         elif k == "people":
             self.people_filter = c.arg
             self.show_dash()
@@ -657,12 +715,27 @@ class Terminal(App):
 
     @work(exclusive=True)
     async def do_order(self, req: OrderRequest) -> None:
-        q = self.store.quotes.get(req.symbol)
-        ref = q.price if q else None
-        if q:
-            age = (utcnow() - q.updated_at).total_seconds()
-            if req.type == "market" and age > 60 and self.s.data_mode != "mock":
-                self.say(f"warning: last {req.symbol} trade is {age_str(age)} old, price may have moved", err=True)
+        cls = asset_class(req.symbol)
+        ref = None
+        if cls == "option":
+            try:
+                oq = await self.hub.option_quote(req.symbol)
+            except Exception as ex:
+                self.say(f"no quote for {req.symbol}: {ex}", err=True)
+                return
+            if oq.bid and oq.ask:
+                ref = round((oq.bid + oq.ask) / 2, 2)
+            else:
+                ref = oq.last or oq.ask or oq.bid
+        else:
+            q = self.store.quotes.get(req.symbol)
+            ref = q.price if q else None
+            if q is None and self.follow and cls in ("equity", "crypto"):
+                await self.follow(req.symbol)  # start the feed so the next try has a price
+            if q:
+                age = (utcnow() - q.updated_at).total_seconds()
+                if req.type == "market" and age > 60 and self.s.data_mode != "mock" and cls != "crypto":
+                    self.say(f"warning: last {req.symbol} trade is {age_str(age)} old, price may have moved", err=True)
         try:
             est = check_order(req, ref, self.s.max_order_value)
         except OrderRejected as ex:

@@ -9,8 +9,10 @@ Security functions (ticker + code):
   AAPL FA [Q]     financial statements, annual (or quarterly)
   AAPL EST        analyst ratings, EPS surprises, key stats
   AAPL INS        insider trades (Form 4)
+  AAPL OWN        institutional holders (SEC 13F)
   AAPL OPT [n]    options chain, n = expiry number or YYYY-MM-DD
   BTC/USD CH      crypto works anywhere a ticker does
+  ES=F CH  ^VIX CH  EURUSD=X CH   futures, indices and FX (delayed)
 
 Market screens:
   MAIN            back to the main screen (Esc does the same)
@@ -20,6 +22,10 @@ Market screens:
   ORD             orders and executions blotter
   N               all news
   PPL [name]      congressional trades and commentator mentions
+
+Chat (other livenews terminals, see README for hosting):
+  MSG             open chat          MSG #desk        open a room
+  MSG hello all   send to the current room          MSG @sam check $NVDA   direct message
 
 Watchlists and alerts:
   W               show watchlist        W ADD NVDA AMD   W DEL AMD
@@ -35,18 +41,22 @@ Orders (a ticket always opens for confirmation):
   SELL AAPL 10 STP 175 LMT 174 stop limit
   SELL AAPL 10 TRAIL 3         trailing stop, 3%
   add GTC to keep it past today (default DAY)
+  BUY BTC/USD 0.05             crypto, fractional, always GTC
+  BUY AAPL260116C00200000 2 LMT 4.10   option contracts (or press B/S on the OPT screen)
   CXL ALL  or  CXL <order id>
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .options_math import parse_occ
+
 SECURITY_FUNCS = {"Q": "quote", "QUOTE": "quote", "GO": "quote", "N": "news", "NEWS": "news",
                   "CH": "chart", "CHART": "chart", "G": "chart", "DES": "des", "FA": "fa", "EST": "est",
-                  "INS": "ins", "OWN": "ins", "OPT": "opt", "OPTIONS": "opt"}
+                  "INS": "ins", "OWN": "own", "HDS": "own", "OPT": "opt", "OPTIONS": "opt"}
 SPANS = ("1D", "5D", "1M", "3M", "6M", "1Y", "5Y")
 # words whose own arguments can look like a function code, so "ALRT NEWS x" stays an alert
-NO_ESCAPE = {"BUY", "SELL", "ALRT", "ALERT", "ALERTS", "CXL", "CANCEL", "PPL", "PEOPLE", "HELP"}
+NO_ESCAPE = {"BUY", "SELL", "ALRT", "ALERT", "ALERTS", "CXL", "CANCEL", "PPL", "PEOPLE", "HELP", "MSG", "CHAT", "IB"}
 MARKET_ALIASES = {"MKTS": "", "FX": "FX", "RATES": "RATES", "CMDTY": "COMMODITIES", "CRYPTO": "CRYPTO"}
 
 
@@ -67,6 +77,13 @@ class Command:
 
 
 def is_ticker(tok: str) -> bool:
+    if parse_occ(tok):  # option contract, AAPL260116C00200000
+        return True
+    # index (^GSPC), future (ES=F), FX cross (EURUSD=X), dollar index (DX-Y.NYB)
+    if tok.startswith("^") and tok[1:].replace(".", "").isalnum() and len(tok) <= 10:
+        return True
+    if tok.endswith("=F") or tok.endswith("=X") or tok == "DX-Y.NYB":
+        return tok.split("=")[0].replace("-", "").replace(".", "").isalnum()
     if "/" in tok:  # crypto pair like BTC/USD
         a, _, b = tok.partition("/")
         return a.isalpha() and b.isalpha() and 2 <= len(a) <= 6 and 3 <= len(b) <= 4
@@ -169,6 +186,11 @@ def parse(line: str) -> Command:
         return Command("port")
     if head in ("ORD", "BLOT", "FILLS"):
         return Command("blotter")
+    if head in ("MSG", "CHAT", "IB"):
+        if rest and (rest[0].startswith("#") or rest[0].startswith("@")):
+            return Command("msg", arg=rest[0].lower() if rest[0].startswith("#") else "@" + rest[0][1:].lower(),
+                           args=_raw_words(line)[2:])
+        return Command("msg", args=_raw_words(line)[1:])
     if head in ("PPL", "PEOPLE"):
         return Command("people", arg=" ".join(rest))
     if head == "W":
@@ -192,10 +214,15 @@ def parse(line: str) -> Command:
     return Command("error", error=f"don't know {line.strip()!r}, type HELP")
 
 
+def _raw_words(line: str) -> list[str]:
+    """Original-case words, for chat text."""
+    return line.strip().split()
+
+
 def _security(sym: str, rest: list[str]) -> Command:
     fn = SECURITY_FUNCS.get(rest[0], None) if rest else "quote"
     if fn is None:
-        return Command("error", error=f"unknown function {rest[0]!r}. Try Q N CH DES FA EST INS OPT")
+        return Command("error", error=f"unknown function {rest[0]!r}. Try Q N CH DES FA EST INS OWN OPT")
     args = rest[1:]
     if fn == "chart":
         span = args[0] if args else "6M"

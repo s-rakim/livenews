@@ -1,21 +1,26 @@
 """Local fake broker for mock mode. Market orders fill at the simulated last
 price. Limit, stop, stop-limit and trailing stops sit until the price says
-they should trigger. Every event goes to the execution blotter."""
+they should trigger. Options fill at the model mid the OPT screen shows and
+settle at intrinsic value once they expire. Every event goes to the
+execution blotter."""
 from __future__ import annotations
 
 import itertools
+from datetime import date
 
 from ..models import Account, Execution, Order, Position, utcnow
+from ..options_math import parse_occ
 from ..store import Store
-from .base import Broker, OrderRejected, OrderRequest
+from .base import Broker, OrderRejected, OrderRequest, multiplier
 
 
 class SimBroker(Broker):
     name = "local sim"
     is_live = False
 
-    def __init__(self, store: Store, cash: float = 100_000.0):
+    def __init__(self, store: Store, cash: float = 100_000.0, option_mark=None):
         self.store = store
+        self.option_mark = option_mark  # callable(occ symbol) -> mid price
         self.cash = cash
         self.start = cash
         self.pos: dict[str, tuple[float, float]] = {}  # sym -> (qty, avg)
@@ -24,10 +29,28 @@ class SimBroker(Broker):
         self._trail_ref: dict[str, float] = {}
 
     def _last(self, sym: str) -> float:
+        if parse_occ(sym):
+            px = self.option_mark(sym) if self.option_mark else None
+            if not px:
+                raise OrderRejected(f"no price for {sym}")
+            return round(px, 2)
         q = self.store.quotes.get(sym)
         if not q:
             raise OrderRejected(f"no price for {sym}")
         return q.price
+
+    def _settle_expired(self) -> None:
+        today = date.today()
+        for sym, (qty, avg) in list(self.pos.items()):
+            c = parse_occ(sym)
+            if not c or c.expiry >= today:
+                continue
+            q = self.store.quotes.get(c.root)
+            spot = q.price if q else 0.0
+            value = max(0.0, spot - c.strike) if c.right == "C" else max(0.0, c.strike - spot)
+            self.cash += qty * value * 100
+            del self.pos[sym]
+            self.store.note(f"{sym} expired, settled at {value:.2f}")
 
     def _event(self, o: Order, ev: str, qty: float, price: float | None = None) -> None:
         now = utcnow()
@@ -43,7 +66,7 @@ class SimBroker(Broker):
             avg = (avg * abs(qty) + px * abs(signed)) / abs(new) if new else 0.0
         elif (new > 0) != (qty > 0) and new != 0:
             avg = px  # flipped through zero
-        self.cash -= signed * px
+        self.cash -= signed * px * multiplier(o.symbol)
         if abs(new) < 1e-9:
             self.pos.pop(o.symbol, None)
         else:
@@ -102,6 +125,7 @@ class SimBroker(Broker):
                 self._event(o, "canceled", o.qty)
 
     async def refresh(self) -> None:
+        self._settle_expired()
         for o in self.orders:
             if o.status == "new":
                 self._work(o)
@@ -109,8 +133,9 @@ class SimBroker(Broker):
         mv = 0.0
         for sym, (qty, avg) in self.pos.items():
             px = self._last(sym)
-            positions.append(Position(sym, qty, avg, px))
-            mv += qty * px
+            m = multiplier(sym)
+            positions.append(Position(sym, qty, avg, px, m))
+            mv += qty * px * m
         eq = self.cash + mv
         self.store.account = Account(equity=eq, cash=self.cash, buying_power=max(self.cash, 0), day_pl=eq - self.start)
         self.store.positions = positions

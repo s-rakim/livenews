@@ -8,3 +8,7 @@ def _isolated_home(tmp_path, monkeypatch):
     for k in ("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY", "LIVENEWS_DATA", "LIVENEWS_TRADING_MODE",
               "LIVENEWS_ALLOW_LIVE", "LIVENEWS_WATCHLIST"):
         monkeypatch.delenv(k, raising=False)
+    # no background chat relay, Yahoo calls or House Clerk downloads unless a test opts in
+    monkeypatch.setenv("LIVENEWS_CHAT", "off")
+    monkeypatch.setenv("LIVENEWS_DELAYED", "off")
+    monkeypatch.setenv("LIVENEWS_HOUSE", "off")

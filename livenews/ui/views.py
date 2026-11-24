@@ -6,6 +6,7 @@ import asyncio
 from datetime import date, datetime, timezone
 
 from rich.text import Text
+from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.widgets import DataTable, Static
 from textual_plotext import PlotextPlot
@@ -216,7 +217,7 @@ class ChartView(FnView):
 class MarketsView(FnView):
     code = "MKTS"
     refresh_every = 5.0
-    SECTIONS = ("INDICES", "RATES", "FX", "COMMODITIES", "CRYPTO")
+    SECTIONS = ("INDICES", "FUTURES", "RATES", "FX", "COMMODITIES", "CRYPTO")
 
     def __init__(self, hub, store, focus: str = ""):
         super().__init__(hub, store)
@@ -231,8 +232,9 @@ class MarketsView(FnView):
         with Grid(id="mk_grid"):
             for s in self.SECTIONS:
                 yield _panel(_table(f"mk_{s}", "NAME", "LAST", "CHG", "%CHG", "AS OF", "SOURCE"), s, f"mkp_{s}")
-        yield Static(Text(" Live = Alpaca stream/snapshot (ETFs, crypto). Daily = FRED and ECB reference rates, "
-                          "which update once a day. Real-time FX, futures and bond quotes have no free source.", style=DIM))
+        yield Static(Text(" AS OF is the time of the last print, so you see the real delay. Alpaca = real time. "
+                          "Finnhub/OANDA = streaming FX. Yahoo = delayed (CME futures ~10 min). FRED/ECB = official "
+                          "daily values. Enter on a row charts it.", style=DIM))
 
     def on_mount(self):
         super().on_mount()
@@ -245,8 +247,11 @@ class MarketsView(FnView):
         now = datetime.now(timezone.utc)
         for s in self.SECTIONS:
             t = self.query_one(f"#mk_{s}", DataTable)
+            cur = t.cursor_row
             t.clear()
+            self._seen: set[str] = set()
             for r in data.get(s, []):
+                key = ("FRED:" + r.symbol) if "FRED" in r.source else r.symbol
                 if isinstance(r.asof, datetime):
                     asof = Text(age_str((now - r.asof).total_seconds()) + " ago", style=UP if r.live else AMBER)
                 elif isinstance(r.asof, date):
@@ -255,9 +260,19 @@ class MarketsView(FnView):
                     asof = Text("-", style=DIM)
                 val = "-" if r.value is None else (f"{r.value:.3f}%" if r.unit == "%" else price(r.value))
                 ch = signed(r.change, "{:+.3f}" if r.unit == "%" else "{:+,.4f}" if r.value and r.value < 10 else "{:+,.2f}")
+                if key in self._seen:
+                    continue
+                self._seen.add(key)
                 t.add_row(Text(r.name, style="bold"), val, ch, pct_text(r.pct) if r.pct is not None else Text(""), asof,
-                          Text(r.source + ("" if r.live else " (daily)"), style=DIM))
+                          Text(r.source + ("" if r.live else " (daily)"), style=DIM), key=key)
+            if cur is not None and t.row_count:
+                t.move_cursor(row=min(cur, t.row_count - 1), animate=False)
         self.query_one("#fn_err", Static).update(Text(" " + " | ".join(errs), style=DOWN) if errs else "")
+
+    def on_data_table_row_selected(self, e: DataTable.RowSelected) -> None:
+        e.stop()
+        sym = str(e.row_key.value)
+        self.app.show_fn(ChartView(self.hub, self.store, sym, "1D" if not sym.startswith("FRED:") else "1Y"))
 
 
 # --- economic calendar --------------------------------------------------------
@@ -276,7 +291,8 @@ class EcoView(FnView):
 
     def compose(self):
         yield Static(id="fn_err")
-        yield _panel(_table("eco_t", "DATE", "DAY", "EVENT", "TYPE", "DETAIL", "SOURCE"), "ECONOMIC CALENDAR", "eco_p")
+        yield _panel(_table("eco_t", "DATE", "DAY", "ET (USUAL)", "EVENT", "TYPE", "DETAIL", "SOURCE"),
+                     "ECONOMIC CALENDAR", "eco_p")
 
     async def load(self):
         evs = await self.hub.eco(self.days, self.symbols)
@@ -290,9 +306,10 @@ class EcoView(FnView):
             elif e.kind == "earnings":
                 style = CYAN
             t.add_row(Text(e.when.isoformat(), style=UP if e.when == today else AMBER), e.when.strftime("%a"),
+                      Text(e.time, style=AMBER if e.time[:1].isdigit() else DIM),
                       Text(e.name, style=style), e.kind, e.detail, Text(e.source, style=DIM))
         self.query_one("#eco_p").border_subtitle = (
-            "release dates from FRED (times aren't published there), earnings for your watchlist from Finnhub")
+            "dates from FRED, times are each agency's usual slot, earnings for your watchlist from Finnhub")
 
 
 # --- company ------------------------------------------------------------------
@@ -392,10 +409,44 @@ class EstView(FnView):
         with Horizontal():
             yield _panel(_table("est_r", "MONTH", "STR BUY", "BUY", "HOLD", "SELL", "STR SELL", "SCORE"), "ANALYST RATINGS")
             yield _panel(_table("est_e", "QUARTER", "EST", "ACTUAL", "SURPRISE"), "EPS VS ESTIMATE")
-        yield _panel(Static(id="est_m"), "KEY STATS", "est_mp")
+        with Horizontal(id="est_bottom"):
+            yield _panel(Static(id="est_pt"), "PRICE TARGET", "est_ptp")
+            yield _panel(Static(id="est_m"), "KEY STATS", "est_mp")
+
+    def _target(self, pt: dict | None) -> Text:
+        t = Text()
+        if not pt or not pt.get("mean"):
+            t.append((pt or {}).get("missing", "no price target published"), style=DIM)
+            return t
+        q = self.store.quotes.get(self.symbol)
+        last = q.price if q else None
+        for label, k in (("Mean", "mean"), ("Median", "median"), ("High", "high"), ("Low", "low")):
+            v = pt.get(k)
+            if v is None:
+                continue
+            t.append(f"{label:<7}", style=DIM)
+            t.append(f"{v:>10,.2f}", style=AMBER)
+            if last:
+                up = (v / last - 1) * 100
+                t.append(f"  {up:+6.1f}% vs last", style=UP if up >= 0 else DOWN)
+            t.append("\n")
+        if pt.get("high") and pt.get("low") and last:
+            lo, hi = pt["low"], pt["high"]
+            width = 30
+            pos = 0 if hi <= lo else int(round((min(max(last, lo), hi) - lo) / (hi - lo) * (width - 1)))
+            bar = "".join("\u25cf" if i == pos else "\u2500" for i in range(width))
+            t.append(f"\n{lo:,.0f} ", style=DIM)
+            t.append(bar, style=CYAN)
+            t.append(f" {hi:,.0f}\n", style=DIM)
+            t.append(f"last {last:,.2f} within the street range\n", style=DIM)
+        if pt.get("updated"):
+            t.append(f"updated {pt['updated']}", style=DIM)
+        return t
 
     async def load(self):
         a = await self.hub.analysts(self.symbol)
+        self.query_one("#est_pt", Static).update(self._target(a.get("target")))
+        self.query_one("#est_ptp").border_subtitle = (a.get("target") or {}).get("source", "")
         rt = self.query_one("#est_r", DataTable)
         rt.clear()
         for r in a["recs"][:6]:
@@ -453,13 +504,80 @@ class InsView(FnView):
         self.query_one("#ins_p").border_subtitle = f"{d['source']}. {d.get('note', '')}"
 
 
+class OwnView(FnView):
+    code = "OWN"
+
+    def __init__(self, hub, store, symbol):
+        super().__init__(hub, store)
+        self.symbol = symbol
+
+    @property
+    def title(self):
+        return f"{self.symbol} OWN"
+
+    def compose(self):
+        yield Static(id="own_head")
+        yield Static(id="fn_err")
+        yield _panel(_table("own_t", "#", "HOLDER", "SHARES", "VALUE", "% OF SHARES OUT", "% OF 13F TOTAL", "FILED"),
+                     "INSTITUTIONAL HOLDERS (13F)", "own_p")
+
+    async def load(self):
+        self.query_one("#own_head", Static).update(Text(
+            " loading 13F holdings. The first lookup each quarter downloads the SEC data set (~100MB) and indexes it, "
+            "watch the 13F feed on line 2.", style=DIM))
+        d = await self.hub.holders(self.symbol)
+        so = d.get("shares_out")
+        t = self.query_one("#own_t", DataTable)
+        t.clear()
+        for i, r in enumerate(d["rows"], 1):
+            t.add_row(str(i), Text(r["manager"], style="bold"), fmt_vol(r["shares"]), "$" + fmt_vol(r["value"]),
+                      f"{r['shares'] / so * 100:.2f}%" if so else "-",
+                      f"{r['shares'] / d['total_shares'] * 100:.2f}%" if d["total_shares"] else "-", r.get("filed", ""))
+        head = Text()
+        head.append(f" {self.symbol} ", style=f"bold #000000 on {AMBER}")
+        head.append(f"  {d['issuer']}  CUSIP {d['cusip']}   ", style=WHITE)
+        head.append(f"{d['count']:,} institutions hold {fmt_vol(d['total_shares'])} shares (${fmt_vol(d['total_value'])})", style=AMBER)
+        if so:
+            head.append(f" = {d['total_shares'] / so * 100:.1f}% of {fmt_vol(so)} shares out", style=AMBER)
+        head.append(f"\n period {d['period']}. 13Fs are filed up to 45 days after quarter end and list long positions only.",
+                    style=DIM)
+        self.query_one("#own_head", Static).update(head)
+        self.query_one("#own_p").border_subtitle = d.get("source", "")
+
+
 class OptView(FnView):
     code = "OPT"
     refresh_every = 15.0
+    BINDINGS = [Binding("b", "trade('buy')", "Buy contract"), Binding("s", "trade('sell')", "Sell contract")]
 
     def __init__(self, hub, store, symbol, which: str = ""):
         super().__init__(hub, store)
         self.symbol, self.which = symbol, which
+        self._chain = None
+        self._strikes: list[float] = []
+
+    def action_trade(self, side: str) -> None:
+        """Put an order for the contract under the cursor on the command line.
+        Nothing is sent: Enter opens the usual ticket."""
+        if not self._chain or not self._strikes:
+            return
+        t = self.query_one("#opt_t", DataTable)
+        row, col = t.cursor_coordinate
+        if col == 8 or not 0 <= row < len(self._strikes):
+            self.app.notify("Move left onto a call or right onto a put first.")
+            return
+        k = self._strikes[row]
+        q = (self._chain.calls if col < 8 else self._chain.puts).get(k)
+        if q is None:
+            return
+        px = (q.bid + q.ask) / 2 if q.bid and q.ask else q.last or q.ask
+        line = f"{side.upper()} {q.symbol} 1" + (f" LMT {px:.2f}" if px else "")
+        from textual.widgets import Input
+
+        inp = self.app.query_one("#cmd", Input)
+        inp.value = line
+        inp.focus()
+        inp.cursor_position = len(line)
 
     @property
     def title(self):
@@ -468,8 +586,10 @@ class OptView(FnView):
     def compose(self):
         yield Static(id="opt_head")
         yield Static(id="fn_err")
-        yield _panel(_table("opt_t", "BID", "ASK", "LAST", "IV", "DELTA", "GAMMA", "THETA", "VOL", "│ STRIKE │",
-                            "BID ", "ASK ", "LAST ", "IV ", "DELTA ", "GAMMA ", "THETA ", "VOL "), "CALLS  |  PUTS", "opt_p")
+        t = _table("opt_t", "BID", "ASK", "LAST", "IV", "DELTA", "GAMMA", "THETA", "VOL", "│ STRIKE │",
+                   "BID ", "ASK ", "LAST ", "IV ", "DELTA ", "GAMMA ", "THETA ", "VOL ")
+        t.cursor_type = "cell"
+        yield _panel(t, "CALLS  |  PUTS", "opt_p")
 
     def _expiry(self) -> date | None:
         w = self.which
@@ -489,8 +609,10 @@ class OptView(FnView):
                 self.which = ch.expiries[i].isoformat()
                 ch = await self.hub.chain(self.symbol, ch.expiries[i])
         t = self.query_one("#opt_t", DataTable)
+        keep = t.cursor_coordinate if self._chain is not None and self._chain.expiry == ch.expiry else None
         t.clear()
         strikes = sorted(set(ch.calls) | set(ch.puts))
+        self._chain, self._strikes = ch, strikes
         atm = min(strikes, key=lambda k: abs(k - ch.spot)) if strikes and ch.spot else None
 
         def side(q, itm):
@@ -507,8 +629,10 @@ class OptView(FnView):
             c, p = ch.calls.get(k), ch.puts.get(k)
             mid = Text(f"│ {k:>7.2f} │", style=f"bold #000000 on {AMBER}" if k == atm else "bold")
             t.add_row(*side(c, ch.spot and k < ch.spot), mid, *side(p, ch.spot and k > ch.spot), key=str(k))
-        if atm is not None:
-            t.move_cursor(row=strikes.index(atm))
+        if keep is not None and keep.row < len(strikes):
+            t.move_cursor(row=keep.row, column=keep.column)
+        elif atm is not None:
+            t.move_cursor(row=strikes.index(atm), column=2)
         dte = (ch.expiry - date.today()).days if ch.expiry else None
         head = Text()
         head.append(f" {self.symbol} ", style=f"bold #000000 on {AMBER}")
@@ -516,7 +640,8 @@ class OptView(FnView):
         head.append("expiries: ", style=DIM)
         for i, e in enumerate(ch.expiries[:12], 1):
             head.append(f"{i}:{e:%m-%d} ", style=f"bold {AMBER}" if e == ch.expiry else DIM)
-        head.append(f"\n {ch.note}  Type {self.symbol} OPT <n> for another expiry. Strikes within 20% of spot.", style=DIM)
+        head.append(f"\n {ch.note}  {self.symbol} OPT <n> for another expiry.  B/S on a contract puts an order "
+                    "on the command line.", style=DIM)
         self.query_one("#opt_head", Static).update(head)
         self.query_one("#opt_p").border_subtitle = ch.source
 
@@ -540,14 +665,19 @@ class PortView(FnView):
             self.query_one("#port_s", Static).update(Text(" No positions. Risk numbers appear once you hold something.", style=DIM))
             self.query_one("#port_t", DataTable).clear()
             return
-        syms = [p.symbol for p in pos]
-        closes = await asyncio.gather(*(self.hub.daily_closes(s) for s in syms + ["SPY"]), return_exceptions=True)
+
+        async def none():
+            return []
+
+        # an option's own price history is too short and gappy for beta or VaR
+        closes = await asyncio.gather(*(none() if p.mult != 1 else self.hub.daily_closes(p.symbol) for p in pos),
+                                      self.hub.daily_closes("SPY"), return_exceptions=True)
         bench = closes[-1] if not isinstance(closes[-1], Exception) else []
         hs = []
         for p, cl in zip(pos, closes):
             q = self.store.quotes.get(p.symbol)
             hs.append(Holding(p.symbol, p.qty, p.market_price, p.avg_entry, q.prev_close if q else 0.0,
-                              cl if not isinstance(cl, Exception) else []))
+                              cl if not isinstance(cl, Exception) else [], p.mult))
         r = portfolio_risk(hs, bench)
         t = Text()
 
@@ -670,3 +800,129 @@ class WatchView(FnView):
 def _replace(table: DataTable, rows):
     from .app import Terminal
     Terminal._replace(table, rows)
+
+
+# --- chat ---------------------------------------------------------------------
+
+class ChatView(FnView):
+    code = "MSG"
+    refresh_every = 0.5
+
+    def __init__(self, hub, store, chat, room: str = ""):
+        super().__init__(hub, store)
+        self.chat = chat
+        self.start_room = room
+        self._last = None
+
+    def _label(self, room: str) -> str:
+        if room.startswith("@") and "+" in room:
+            me = self.chat.state.user.lower()
+            others = [n for n in room[1:].split("+") if n != me] or [me]
+            return "@" + others[0]
+        return room
+
+    @property
+    def title(self):
+        return f"MSG {self._label(self.start_room or self.chat.state.room)}"
+
+    def compose(self):
+        from textual.widgets import Input
+        with Horizontal():
+            with Vertical(id="chat_side"):
+                yield _panel(_table("chat_rooms", "ROOM", "NEW"), "ROOMS", "chat_rp")
+                yield _panel(_table("chat_users", "ONLINE"), "PEOPLE", "chat_up")
+            with Vertical(id="chat_main"):
+                yield _panel(VerticalScroll(Static(id="chat_log"), id="chat_scroll"), "MESSAGES", "chat_mp")
+                yield Input(placeholder="type a message, Enter sends.  /join #room   /dm name   $TICKER links a ticker",
+                            id="chat_in")
+
+    def on_mount(self):
+        self.chat.viewing = True
+        super().on_mount()
+        if self.start_room:
+            self.run_worker(self.chat.switch(self.start_room))
+        self.query_one("#chat_in").focus()
+
+    def on_unmount(self):
+        self.chat.viewing = False
+
+    async def on_input_submitted(self, e) -> None:
+        if e.input.id != "chat_in":
+            return
+        e.stop()
+        text = e.value.strip()
+        e.input.value = ""
+        if not text:
+            return
+        try:
+            if text.startswith("/join "):
+                room = text.split(None, 1)[1].strip()
+                await self.chat.switch(room if room.startswith("#") else "#" + room)
+            elif text.startswith("/dm "):
+                parts = text.split(None, 2)
+                await self.chat.switch("@" + parts[1].lstrip("@"))
+                if len(parts) > 2:
+                    await self.chat.send(parts[2])
+            else:
+                await self.chat.send(text)
+        except Exception as ex:
+            self.app.say(f"chat: {ex}", err=True)
+        await self.load()
+
+    def on_data_table_row_selected(self, e: DataTable.RowSelected) -> None:
+        e.stop()
+        key = str(e.row_key.value)
+        target = key if key.startswith(("#", "@")) else "@" + key
+        self.run_worker(self._switch(target))
+
+    async def _switch(self, target):
+        await self.chat.switch(target)
+        await self.load()
+
+    async def load(self):
+        from ..chat import TICKER_RX
+        st = self.chat.state
+        st.unread[st.room] = 0
+        rooms = sorted(set(st.rooms) | {st.room, "#general"})
+        rrows = []
+        for r in rooms:
+            rrows.append((r, (Text(self._label(r), style=f"bold {AMBER}" if r == st.room else WHITE),
+                              Text(str(st.unread.get(r, 0) or ""), style=DOWN))))
+        rt = self.query_one("#chat_rooms", DataTable)
+        _replace(rt, rrows)
+        if st.room in rooms and rt.cursor_row != rooms.index(st.room) and not rt.has_focus:
+            rt.move_cursor(row=rooms.index(st.room), animate=False)
+        if getattr(self, "_titled", None) != st.room:
+            self._titled = st.room
+            self.app.set_fnbar(f"MSG {self._label(st.room)}")
+        _replace(self.query_one("#chat_users", DataTable),
+                 [(u, (Text(u + (" (you)" if u == st.user else ""), style=UP),)) for u in st.users])
+        msgs = list(st.rooms.get(st.room, ()))
+        sig = (st.room, len(msgs), msgs[-1]["ts"] if msgs else "", st.status)
+        mp = self.query_one("#chat_mp")
+        where = "hosting on this machine" if st.hosting else st.url
+        mp.border_title = f"MESSAGES  {self._label(st.room)}"
+        mp.border_subtitle = f"you are {st.user}  |  {st.status}  |  {where}"
+        if sig == self._last:
+            return
+        self._last = sig
+        t = Text()
+        for m in msgs[-300:]:
+            ts = m.get("ts", "")
+            try:
+                local = datetime.fromisoformat(ts).astimezone().strftime("%H:%M:%S")
+            except ValueError:
+                local = ts[-8:]
+            t.append(f"{local} ", style=DIM)
+            t.append(f"{m.get('from', '?')}: ", style=f"bold {CYAN if m.get('from') == st.user else AMBER}")
+            body = m.get("text", "")
+            pos = 0
+            for mt in TICKER_RX.finditer(body):
+                t.append(body[pos:mt.start()], style=WHITE)
+                t.append(mt.group(0).upper(), style=f"bold {UP}")
+                pos = mt.end()
+            t.append(body[pos:] + "\n", style=WHITE)
+        if not msgs:
+            t.append("No messages in this room yet.", style=DIM)
+        self.query_one("#chat_log", Static).update(t)
+        self.query_one("#chat_scroll", VerticalScroll).scroll_end(animate=False)

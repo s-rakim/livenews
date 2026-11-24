@@ -54,18 +54,19 @@ class Holding:
     avg: float
     prev_close: float
     closes: list[float]
+    mult: float = 1.0
 
     @property
     def value(self) -> float:
-        return self.qty * self.price
+        return self.qty * self.price * self.mult
 
     @property
     def unrealized(self) -> float:
-        return (self.price - self.avg) * self.qty
+        return (self.price - self.avg) * self.qty * self.mult
 
     @property
     def day_pl(self) -> float:
-        return (self.price - self.prev_close) * self.qty if self.prev_close else 0.0
+        return (self.price - self.prev_close) * self.qty * self.mult if self.prev_close else 0.0
 
 
 @dataclass

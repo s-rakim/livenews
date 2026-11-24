@@ -44,6 +44,38 @@ class EcoEvent:
     important: bool = False
     detail: str = ""
     source: str = ""
+    time: str = ""  # usual release time, US Eastern
+
+
+# FRED gives release dates but not times. These are the times the agencies
+# have used for years; a release can move, so the screen labels them "usual".
+RELEASE_TIMES = [
+    ("ADP National Employment", "08:15"),
+    ("Consumer Price Index", "08:30"), ("Employment Situation", "08:30"), ("Gross Domestic Product", "08:30"),
+    ("Personal Income and Outlays", "08:30"), ("Producer Price Index", "08:30"),
+    ("Retail", "08:30"), ("Unemployment Insurance Weekly Claims", "08:30"),
+    ("New Residential Construction", "08:30"), ("Durable Goods", "08:30"),
+    ("International Trade in Goods and Services", "08:30"), ("Advance Economic Indicators", "08:30"),
+    ("Employment Cost Index", "08:30"), ("Productivity and Costs", "08:30"),
+    ("Import and Export Price", "08:30"), ("Chicago Fed National Activity", "08:30"),
+    ("Empire State Manufacturing", "08:30"), ("Manufacturing Business Outlook", "08:30"),
+    ("Case-Shiller", "09:00"), ("Industrial Production", "09:15"),
+    ("Job Openings and Labor Turnover", "10:00"), ("Existing Home Sales", "10:00"),
+    ("Surveys of Consumers", "10:00"), ("New Residential Sales", "10:00"),
+    ("Construction Spending", "10:00"), ("Pending Home Sales", "10:00"),
+    ("Manufacturers' Shipments, Inventories", "10:00"), ("Quarterly Services", "10:00"),
+    ("FOMC", "14:00"), ("Beige Book", "14:00"), ("Consumer Credit", "15:00"),
+    ("Treasury International Capital", "16:00"), ("H.8 Assets and Liabilities", "16:15"),
+    ("H.4.1", "16:30"), ("Petroleum Status", "10:30"),
+]
+
+
+def usual_time(release_name: str) -> str:
+    low = release_name.lower()
+    for key, t in RELEASE_TIMES:
+        if key.lower() in low:
+            return t
+    return ""
 
 
 @dataclass
@@ -150,6 +182,15 @@ class Hub:
         raise NotImplementedError
 
     async def chain(self, symbol: str, expiry: date | None = None) -> Chain:
+        raise NotImplementedError
+
+    async def option_quote(self, occ: str) -> OptionQuote:
+        """One contract by OCC symbol, e.g. AAPL260116C00200000."""
+        raise NotImplementedError
+
+    async def holders(self, symbol: str) -> dict:
+        """Institutional holders: {"rows": [{manager, shares, value, period, filed}], "count", "total_value",
+        "total_shares", "shares_out", "period", "cusip", "issuer", "source"}"""
         raise NotImplementedError
 
     async def aclose(self) -> None:

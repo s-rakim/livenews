@@ -18,6 +18,7 @@ import time
 
 import httpx
 
+from ..broker.base import asset_class
 from ..config import DATA_URL, Settings
 from ..models import NewsItem, Quote, utcnow
 from ..ratelimit import RateLimiter
@@ -87,6 +88,7 @@ class AlpacaData:
         store.feed("NEWS", "Alpaca/Benzinga", f"polled every {settings.news_interval:g}s")
         store.feed("QUOTES", f"Alpaca {settings.alpaca_feed.upper()}", feed_note)
         store.feed("MOVERS", "Alpaca screener", "provider refreshes ~1/min")
+        store.feed("CRYPTO", "Alpaca crypto", "real-time, 24/7; day change is vs the prior UTC day")
 
     async def _get(self, path: str, params: dict | None = None) -> tuple[dict, float]:
         await self.limiter.acquire()
@@ -124,9 +126,13 @@ class AlpacaData:
 
     # quotes -----------------------------------------------------------------
     def universe(self) -> list[str]:
+        """US stocks to snapshot: watchlist, lookups, open positions, the
+        screener lists and anything tagged in the last half hour of news."""
+        held = [p.symbol for p in self.store.positions]
         syms = dict.fromkeys(
-            [*self.s.watchlist, *self.extra_symbols, *self.store.provider_gainers,
-             *self.store.provider_losers, *self.store.most_active]
+            s for s in [*self.s.watchlist, *self.extra_symbols, *held, *self.store.provider_gainers,
+                        *self.store.provider_losers, *self.store.most_active]
+            if asset_class(s) == "equity"
         )
         # News-tagged tickers from the last 30 minutes too, so news movers show up.
         for n in list(self.store.news)[:60]:
@@ -137,10 +143,28 @@ class AlpacaData:
                     syms.setdefault(s)
         return list(syms)[:200]
 
+    def crypto_universe(self) -> list[str]:
+        held = [p.symbol for p in self.store.positions]
+        return list(dict.fromkeys(s for s in [*self.s.watchlist, *self.extra_symbols, *held]
+                                  if asset_class(s) == "crypto"))[:50]
+
+    def _merge(self, sym: str, snap: dict) -> Quote | None:
+        parsed = parse_snapshot(sym, snap)
+        if not parsed:
+            return None
+        q, minute_t = parsed
+        old = self.store.quotes.get(sym)
+        if old and old.updated_at > q.updated_at:
+            # the stream already gave us a newer trade, keep that price
+            q.price, q.updated_at = old.price, old.updated_at
+            q.day_volume = max(q.day_volume, old.day_volume)
+        self.store.update_quote(q)
+        if minute_t:
+            self.store.record_minute(sym, minute_key(minute_t), q.minute_volume)
+        return q
+
     async def poll_quotes_once(self) -> None:
         syms = self.universe()
-        if not syms:
-            return
         worst_age = 0.0
         rtt_max = 0.0
         for i in range(0, len(syms), 100):
@@ -154,21 +178,18 @@ class AlpacaData:
             for sym, snap in snaps.items():
                 if not isinstance(snap, dict):
                     continue
-                parsed = parse_snapshot(sym, snap)
-                if not parsed:
-                    continue
-                q, minute_t = parsed
-                old = self.store.quotes.get(sym)
-                if old and old.updated_at > q.updated_at:
-                    # the stream already gave us a newer trade, keep that price
-                    q.price, q.updated_at = old.price, old.updated_at
-                    q.day_volume = max(q.day_volume, old.day_volume)
-                self.store.update_quote(q)
-                if minute_t:
-                    self.store.record_minute(sym, minute_key(minute_t), q.minute_volume)
-                if sym in self.s.watchlist:
+                q = self._merge(sym, snap)
+                if q and sym in self.s.watchlist:
                     worst_age = max(worst_age, (utcnow() - q.updated_at).total_seconds())
-        self.store.feed_ok("QUOTES", rtt_max, worst_age)
+        if syms:
+            self.store.feed_ok("QUOTES", rtt_max, worst_age)
+        coins = self.crypto_universe()
+        if coins:
+            data, rtt = await self._get("/v1beta3/crypto/us/snapshots", {"symbols": ",".join(coins)})
+            for sym, snap in (data.get("snapshots") or {}).items():
+                if isinstance(snap, dict):
+                    self._merge(sym, snap)
+            self.store.feed_ok("CRYPTO", rtt)
 
     # loops ------------------------------------------------------------------
     async def _loop(self, name: str, fn, interval: float) -> None:

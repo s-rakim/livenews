@@ -69,10 +69,11 @@ class Position:
     qty: float
     avg_entry: float
     market_price: float
+    mult: float = 1.0  # 100 for an option contract
 
     @property
     def unrealized(self) -> float:
-        return (self.market_price - self.avg_entry) * self.qty
+        return (self.market_price - self.avg_entry) * self.qty * self.mult
 
 
 @dataclass

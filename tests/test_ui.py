@@ -82,7 +82,8 @@ def test_every_function_screen_loads():
             await pilot.pause(2)
             await broker.submit(__import__("livenews.broker", fromlist=["OrderRequest"]).OrderRequest("NVDA", "buy", 3))
             for cmd in ["NVDA CH", "NVDA CH 1D", "MKTS", "ECO", "NVDA DES", "NVDA FA", "NVDA FA Q", "NVDA EST",
-                        "NVDA INS", "NVDA OPT", "NVDA OPT 2", "PORT", "ORD", "W", "W ADD COIN", "ALRT NVDA > 1"]:
+                        "NVDA INS", "NVDA OWN", "NVDA OPT", "NVDA OPT 2", "PORT", "ORD", "W", "W ADD COIN",
+                        "ALRT NVDA > 1", "ES=F", "^VIX CH 5D", "BTC/USD CH", "FX", "CRYPTO"]:
                 await app.run_command(cmd)
                 await pilot.pause(0.8)
                 if app.fn_view is not None:
@@ -93,5 +94,75 @@ def test_every_function_screen_loads():
             await pilot.press("escape")
             await pilot.pause(0.3)
             assert app.fn_view is None
+
+    asyncio.run(go())
+
+
+def test_option_order_from_chain_keys():
+    app, store, broker = _app()
+
+    async def go():
+        async with app.run_test(size=(200, 55)) as pilot:
+            await pilot.pause(2)
+            await app.run_command("AAPL OPT")
+            await pilot.pause(1)
+            t = app.fn_view.query_one("#opt_t")
+            t.focus()
+            await pilot.pause(0.2)
+            await pilot.press("b")
+            await pilot.pause(0.2)
+            line = app.query_one("#cmd").value
+            assert line.startswith("BUY AAPL") and " 1 LMT " in line, line
+            await pilot.press("enter")
+            await pilot.pause(0.8)
+            assert isinstance(app.screen, OrderTicket)
+            app.screen.query_one("#send", Button).press()
+            await pilot.pause(1.2)
+            pos = [p for p in store.positions if p.symbol.startswith("AAPL") and p.mult == 100]
+            assert pos and pos[0].qty == 1
+
+    asyncio.run(go())
+
+
+def test_crypto_order_on_paper():
+    app, store, broker = _app()
+
+    async def go():
+        async with app.run_test(size=(200, 55)) as pilot:
+            await pilot.pause(2)
+            assert "BTC/USD" in store.quotes
+            await _type(pilot, "buy btc/usd 0.01")
+            await pilot.pause(0.5)
+            assert isinstance(app.screen, OrderTicket)
+            app.screen.query_one("#send", Button).press()
+            await pilot.pause(1)
+            o = store.orders[0]
+            assert o.symbol == "BTC/USD" and o.status == "filled" and o.tif == "gtc"
+
+    asyncio.run(go())
+
+
+def test_chat_screen_sends_and_receives(monkeypatch, tmp_path):
+    monkeypatch.setenv("LIVENEWS_CHAT", "on")
+    monkeypatch.setenv("LIVENEWS_CHAT_SERVE", "127.0.0.1:0")
+    monkeypatch.setenv("LIVENEWS_CHAT_NAME", "desk1")
+    app, store, broker = _app()
+
+    async def go():
+        async with app.run_test(size=(200, 55)) as pilot:
+            for _ in range(40):
+                await pilot.pause(0.1)
+                if app.chat.ws is not None:
+                    break
+            assert app.chat.state.hosting and app.chat.ws is not None
+            await app.run_command("MSG")
+            await pilot.pause(0.5)
+            await app.run_command("MSG eyes on $TSLA")
+            for _ in range(20):
+                await pilot.pause(0.1)
+                if app.chat.state.rooms["#general"]:
+                    break
+            msgs = list(app.chat.state.rooms["#general"])
+            assert msgs and msgs[-1]["text"] == "eyes on $TSLA" and msgs[-1]["from"] == "desk1"
 
     asyncio.run(go())

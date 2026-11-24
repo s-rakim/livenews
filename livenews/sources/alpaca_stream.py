@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 
+from ..broker.base import asset_class
 from ..config import Settings
 from ..models import utcnow
 from ..store import Store
@@ -114,11 +114,12 @@ class NewsStream(_Base):
 
 class TradeStream(_Base):
     name = "QUOTES"
+    asset = "equity"
 
     def __init__(self, settings: Settings, store: Store, limit: int = 30):
         super().__init__(settings, store)
         self.limit = limit
-        self.symbols: list[str] = list(dict.fromkeys(settings.watchlist))[:limit]
+        self.symbols: list[str] = [s for s in dict.fromkeys(settings.watchlist) if asset_class(s) == self.asset][:limit]
         self.last_trade_age: float | None = None
 
     @property
@@ -126,12 +127,13 @@ class TradeStream(_Base):
         return f"{STREAM_BASE}/v2/{self.s.alpaca_feed}"
 
     async def on_open(self, ws) -> None:
-        await ws.send(json.dumps({"action": "subscribe", "trades": self.symbols, "bars": self.symbols}))
+        if self.symbols:
+            await ws.send(json.dumps({"action": "subscribe", "trades": self.symbols, "bars": self.symbols}))
 
     async def follow(self, symbol: str) -> None:
         """Start streaming a symbol the user just looked up. Drops the oldest
         non-watchlist symbol if we're at the plan's limit."""
-        if symbol in self.symbols:
+        if symbol in self.symbols or asset_class(symbol) != self.asset:
             return
         dropped = None
         if len(self.symbols) >= self.limit:
@@ -157,9 +159,24 @@ class TradeStream(_Base):
             ts = parse_ts(m.get("t")) or utcnow()
             if self.store.apply_trade(sym, float(m["p"]), float(m.get("s") or 0), ts):
                 age = (utcnow() - ts).total_seconds()
-                self.store.feed_ok("QUOTES", 0.0, age)
+                self.store.feed_ok(self.name, 0.0, age)
         elif t == "b":
             self.store.record_minute(sym, minute_key(m.get("t", "")), float(m.get("v") or 0))
             q = self.store.quotes.get(sym)
             if q:
                 q.minute_volume = float(m.get("v") or 0)
+
+
+class CryptoStream(TradeStream):
+    """Same message shape as the stock stream, different endpoint. Free and
+    real-time, no 30-symbol cap that I know of; 100 here to be polite."""
+
+    name = "CRYPTO"
+    asset = "crypto"
+
+    def __init__(self, settings: Settings, store: Store):
+        super().__init__(settings, store, limit=100)
+
+    @property
+    def url(self) -> str:
+        return f"{STREAM_BASE}/v1beta3/crypto/us"
